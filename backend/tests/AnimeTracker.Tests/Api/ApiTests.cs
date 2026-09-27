@@ -86,7 +86,8 @@ public class ApiTests(TestApp app) : IAsyncLifetime
     public async Task The_same_title_cannot_be_added_twice_even_at_the_same_time()
     {
         var client = await app.LoginAsAsync("ana@test.local");
-        var responses = await Task.WhenAll(Enumerable.Range(0, 5)
+        // La obra aún no está en el catálogo: las 8 peticiones la descargan y compiten por guardarla.
+        var responses = await Task.WhenAll(Enumerable.Range(0, 8)
             .Select(_ => client.PostAsJsonAsync("/api/list", new { mediaId = Frieren, status = "Planning" })));
 
         Assert.Single(responses, r => r.StatusCode == HttpStatusCode.Created);
@@ -117,14 +118,14 @@ public class ApiTests(TestApp app) : IAsyncLifetime
         var client = await app.LoginAsAsync("ana@test.local");
         var id = await AddAsync(client, Frieren, "Current");
 
-        // Diez "+1" a la vez (el móvil y el ordenador, o un doble toque).
-        var responses = await Task.WhenAll(Enumerable.Range(0, 10).Select(_ => client.PostAsync($"/api/list/{id}/increment", null)));
+        // Veinte "+1" a la vez (el móvil y el ordenador, o un doble toque).
+        var responses = await Task.WhenAll(Enumerable.Range(0, 20).Select(_ => client.PostAsync($"/api/list/{id}/increment", null)));
 
         Assert.All(responses, r => Assert.Equal(HttpStatusCode.OK, r.StatusCode));
         var list = (await client.GetFromJsonAsync<JsonArray>("/api/list?type=Anime", TestApp.Json))!;
-        Assert.Equal(10, list[0]!["progress"]!.GetValue<int>());
+        Assert.Equal(20, list[0]!["progress"]!.GetValue<int>());
         var stats = (await client.GetFromJsonAsync<JsonObject>("/api/stats?type=Anime", TestApp.Json))!;
-        Assert.Equal(10, stats["activity"]!.AsArray().Last()!["amount"]!.GetValue<int>());
+        Assert.Equal(20, stats["activity"]!.AsArray().Last()!["amount"]!.GetValue<int>());
     }
 
     [Fact]

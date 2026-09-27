@@ -49,9 +49,6 @@ public class ConflictException(string message) : Exception(message);
 
 public class ListService(AppDbContext db, CatalogService catalog, TimeProvider time, AppClock clock)
 {
-    /// <summary>Reintentos si otro "+1" ha cambiado la misma entrada a la vez.</summary>
-    public const int MaxConcurrencyRetries = 5;
-
     public async Task<IReadOnlyList<EntryDto>> GetListAsync(string userId, MediaType type, ListStatus? status, CancellationToken ct)
     {
         var query = db.ListEntries.AsNoTracking().Include(e => e.Media)
@@ -108,29 +105,30 @@ public class ListService(AppDbContext db, CatalogService catalog, TimeProvider t
     }
 
     /// <summary>
-    /// "+1 episodio". Con concurrencia optimista (xmin): si otro dispositivo ha cambiado la entrada
-    /// entre la lectura y la escritura, se recarga y se vuelve a aplicar. Nunca se pierde un +1.
+    /// "+1 episodio". La fila se bloquea con SELECT ... FOR UPDATE: si llegan varios +1 a la vez
+    /// (el móvil y el ordenador, un doble toque), PostgreSQL los pone en fila y cada uno lee el
+    /// progreso que dejó el anterior. Ninguno se pierde y ninguno falla.
+    ///
+    /// Primero se probó con concurrencia optimista y reintentos, pero con 10 +1 simultáneos algunos
+    /// agotaban los reintentos (en la CI, con más paralelismo real que en local).
     /// </summary>
     public async Task<EntryDto> IncrementAsync(string userId, long id, CancellationToken ct)
     {
-        for (var attempt = 1; ; attempt++)
-        {
-            var entry = await LoadAsync(userId, id, ct);
-            var advanced = entry.Increment(entry.Media!.Total, clock.Today);
-            entry.UpdatedAt = time.GetUtcNow();
-            AddProgressEvent(entry, advanced);
-            try
-            {
-                // La entrada y su evento se guardan en la misma transacción.
-                await db.SaveChangesAsync(ct);
-                return EntryDto.From(entry);
-            }
-            catch (DbUpdateConcurrencyException) when (attempt < MaxConcurrencyRetries)
-            {
-                // Se descarta todo (también el evento) y se vuelve a leer la versión nueva.
-                db.ChangeTracker.Clear();
-            }
-        }
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        // xmin hay que pedirlo aparte: "SELECT *" no incluye las columnas de sistema de PostgreSQL.
+        var entry = await db.ListEntries
+            .FromSql($"SELECT *, xmin FROM list_entries WHERE \"Id\" = {id} AND \"UserId\" = {userId} FOR UPDATE")
+            .SingleOrDefaultAsync(ct)
+            ?? throw new NotFoundException("Esa entrada no está en tu lista.");
+        await db.Entry(entry).Reference(e => e.Media).LoadAsync(ct);
+
+        var advanced = entry.Increment(entry.Media!.Total, clock.Today);
+        entry.UpdatedAt = time.GetUtcNow();
+        AddProgressEvent(entry, advanced);
+        // La entrada y su evento, en la misma transacción que el bloqueo.
+        await db.SaveChangesAsync(ct);
+        await transaction.CommitAsync(ct);
+        return EntryDto.From(entry);
     }
 
     public async Task<EntryDto> StartRewatchAsync(string userId, long id, CancellationToken ct)

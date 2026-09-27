@@ -62,7 +62,17 @@ public class CatalogService(AppDbContext db, AniListClient aniList, IMemoryCache
             db.Entry(stored).CurrentValues.SetValues(fresh);
             stored.Genres = fresh.Genres;
         }
-        await db.SaveChangesAsync(ct);
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException e) when (stored is null && e.InnerException is Npgsql.PostgresException { SqlState: "23505" })
+        {
+            // Dos peticiones han descargado la misma obra a la vez y la otra la ha guardado antes:
+            // se usa la suya.
+            db.Entry(fresh).State = EntityState.Detached;
+            return await db.Media.FirstAsync(m => m.Id == id, ct);
+        }
         return stored ?? fresh;
     }
 }

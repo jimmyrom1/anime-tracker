@@ -72,16 +72,21 @@ una clase de dominio que se testea sin base de datos:
 ### El botón +1 nunca pierde un episodio
 
 Si pulsas "+1" en el móvil y en el ordenador a la vez, o haces doble toque, las dos peticiones
-leen `progress = 4` y las dos escriben 5. Se ha perdido un episodio. Por eso:
+leen `progress = 4` y las dos escriben 5. Se ha perdido un episodio.
 
-- La entrada usa la columna de sistema `xmin` de PostgreSQL como **token de concurrencia
-  optimista** (`IsRowVersion()` en EF Core). El segundo `UPDATE` no encuentra la versión que leyó
-  y falla.
-- [`ListService.IncrementAsync`](backend/src/AnimeTracker.Api/Lists/ListService.cs) captura ese
-  conflicto, recarga la entrada y vuelve a aplicar el +1 (hasta 5 intentos).
-- Un test lanza **10 "+1" simultáneos** y comprueba que el progreso queda en 10 y que la actividad
-  del mes suma 10.
-- En la interfaz, el botón se desactiva mientras la petición está en curso.
+- **Primer intento: concurrencia optimista.** La columna de sistema `xmin` de PostgreSQL servía de
+  versión (`IsRowVersion()` en EF Core). Si alguien había escrito entre medias, se recargaba y se
+  reintentaba hasta 5 veces. En local los tests pasaban, pero en la CI, con más paralelismo real,
+  algunos de los 10 "+1" simultáneos agotaban los reintentos y devolvían 500.
+- **Solución: bloquear la fila.**
+  [`IncrementAsync`](backend/src/AnimeTracker.Api/Lists/ListService.cs) lee la entrada con
+  `SELECT ... FOR UPDATE` dentro de una transacción. Los "+1" simultáneos esperan en fila en
+  PostgreSQL y cada uno parte del progreso que dejó el anterior: ninguno se pierde y ninguno falla.
+  Hay un detalle que costó un test: `SELECT *` no devuelve `xmin`, así que hay que pedirlo aparte.
+- `xmin` sigue protegiendo la edición completa (PUT): si guardas un formulario que abriste antes de
+  un "+1", recibes `409` en lugar de pisar el progreso.
+- El test lanza **20 "+1" simultáneos** y comprueba que el progreso queda en 20 y que la actividad
+  del mes suma 20. En la interfaz, además, el botón se desactiva mientras la petición está en curso.
 
 ### Las reglas también en la base de datos
 
@@ -89,7 +94,11 @@ La API valida, pero PostgreSQL tiene la última palabra:
 
 - `CHECK (Score BETWEEN 1 AND 10)`, `CHECK (Progress >= 0)` y fechas coherentes.
 - **Índice único `(UserId, MediaId)`**: una obra no puede estar dos veces en tu lista. Un test lanza
-  cinco "añadir" simultáneos y comprueba que pasa uno y los otros cuatro reciben `409`.
+  ocho "añadir" simultáneos de una obra que aún no está en el catálogo, y comprueba que pasa uno y
+  los demás reciben `409`.
+  - La CI destapó una segunda carrera en ese caso: las ocho peticiones descargaban la ficha de
+    AniList e intentaban guardarla a la vez, y chocaban con la clave primaria de `media`. Ahora, si
+    otra petición la ha guardado antes, se usa esa.
 - Nombre de perfil en minúsculas con `CHECK` por expresión regular y único.
 
 ### Catálogo de AniList: pedir lo mínimo y aguantar sus caídas
