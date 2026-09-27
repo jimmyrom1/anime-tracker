@@ -121,9 +121,11 @@ public class TestApp : WebApplicationFactory<Program>, IAsyncLifetime
     {
         using var scope = Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        // Los nombres salen del modelo de EF, no de ninguna entrada externa: no hay riesgo de inyección.
         var tables = db.Model.GetEntityTypes().Select(t => t.GetTableName()).Where(t => t is not null).Distinct()
-            .Select(t => $"\"{t}\"");
-        await db.Database.ExecuteSqlRawAsync($"TRUNCATE {string.Join(", ", tables)} RESTART IDENTITY CASCADE");
+            .Select(t => "\"" + t + "\"");
+        var sql = "TRUNCATE " + string.Join(", ", tables) + " RESTART IDENTITY CASCADE";
+        await db.Database.ExecuteSqlRawAsync(sql);
         // La caché de búsquedas vive en memoria durante toda la app: se vacía entre tests.
         ((MemoryCache)Services.GetRequiredService<IMemoryCache>()).Clear();
         AniList.Requests = 0;
