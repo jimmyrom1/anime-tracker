@@ -20,8 +20,13 @@ services:
     environment:
       ConnectionStrings__Default: Host=db;Database=anime_tracker;Username=anime;Password=anime
       App__TimeZone: Europe/Madrid
+    volumes:
+      # Claves con las que se firman los tokens de sesión. Si se perdieran al recrear el
+      # contenedor, todos los usuarios tendrían que volver a iniciar sesión.
+      - dataprotection:/home/app/.aspnet/DataProtection-Keys
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/health || exit 1"]
+      # La imagen de ASP.NET no trae curl ni wget: se usa /dev/tcp de bash.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /api/health HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 && grep -q '200 OK' <&3"]
       interval: 5s
       retries: 20
 
@@ -35,3 +40,4 @@ services:
 
 volumes:
   pgdata:
+  dataprotection:
